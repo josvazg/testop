@@ -183,6 +183,13 @@ func (r *FakeRemoteReconciler) delete(ctx context.Context, fakeRemote *testopv1.
 	log.Info("Deleted list", "dependents", fakeRemote.Spec.Dependents)
 
 	controllerutil.RemoveFinalizer(fakeRemote, FakeRemoteFinalizerLabel)
+	if err := r.Update(ctx, fakeRemote); err != nil {
+		log.Error(err, "Failed to delete Fake Remote")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
 
 	return ctrl.Result{}, nil
 }
@@ -196,6 +203,10 @@ func (r *FakeRemoteReconciler) ok(ctx context.Context, fakeRemote *testopv1.Fake
 		Message: msg,
 	})
 	if err := r.Update(ctx, fakeRemote); err != nil {
+		log.Error(err, "Failed to update Fake Remote annotations")
+		return ctrl.Result{}, err
+	}
+	if err := r.Status().Update(ctx, fakeRemote); err != nil {
 		log.Error(err, "Failed to update Fake Remote status")
 		return ctrl.Result{}, err
 	}
