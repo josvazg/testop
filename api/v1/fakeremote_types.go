@@ -25,17 +25,16 @@ import (
 
 // FakeRemoteSpec defines the desired state of FakeRemote
 type FakeRemoteSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// SomeOtherField exist only to make the Fake Controller more interesting
+	SomeOtherField string `json:"someOtherField,omitempty"`
 
-	// Foo is an example field of FakeRemote. Edit fakeremote_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// Dependents are a set of remote sub-resources this fake controller manages
+	Dependents []string `json:"dependents,omitempty"`
 }
 
 // FakeRemoteStatus defines the observed state of FakeRemote
 type FakeRemoteStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 //+kubebuilder:object:root=true
