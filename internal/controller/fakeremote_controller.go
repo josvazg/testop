@@ -45,8 +45,17 @@ const (
 
 // Definitions to manage annotations
 const (
-	// typeAvailableFakeRemote represents the status of the FakeRemote reconciliation
+	// lastAppliedConfigAnnotation stores the latests applied config
 	lastAppliedConfigAnnotation = "testop/last-applied-configuration"
+
+	// lastSkippedConfigAnnotation stores the latest skipped config
+	lastSkippedConfigAnnotation = "testop/last-skipped-configuration"
+
+	// resourcePolicyAnnotation holds policy info for reconciliation
+	resourcePolicyAnnotation = "testop/atlas-resource-policy"
+
+	// reconciliationPolicySkip marks the resource should not be reconciled
+	reconciliationPolicySkip = "skip"
 )
 
 // FakeRemoteFinalizerLabel marks not to remove a Fake Remote until reconciled
@@ -123,6 +132,10 @@ func (r *FakeRemoteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *FakeRemoteReconciler) reconcile(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
+	if hasPolicySkip(fakeRemote) {
+		return r.skip(ctx, fakeRemote)
+	}
+
 	previousSpec, err := getLastAppliedConfig(fakeRemote)
 	if err != nil {
 		return r.fail(ctx, fakeRemote, err)
@@ -162,7 +175,14 @@ func (r *FakeRemoteReconciler) update(ctx context.Context, fakeRemote *testopv1.
 			"old someOtherField", previousSpec.SomeOtherField,
 			"new someOtherField", fakeRemote.Spec.SomeOtherField)
 	}
-	if !reflect.DeepEqual(fakeRemote.Spec.Dependents, previousSpec.Dependents) {
+
+	lastSkippedConfig, err := getLastSkippedConfig(fakeRemote)
+	if err != nil {
+		return r.fail(ctx, fakeRemote, err)
+	}
+	if areDependentsDisabled(fakeRemote.Spec.Dependents, lastSkippedConfig) {
+		log.Info("Dependents are Disabled")
+	} else if !reflect.DeepEqual(fakeRemote.Spec.Dependents, previousSpec.Dependents) {
 		log.Info("Updated list",
 			"old dependents", previousSpec.Dependents,
 			"new dependents", fakeRemote.Spec.Dependents)
@@ -191,6 +211,29 @@ func (r *FakeRemoteReconciler) delete(ctx context.Context, fakeRemote *testopv1.
 	return ctrl.Result{}, nil
 }
 
+func (r *FakeRemoteReconciler) skip(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	if err := r.Update(ctx, fakeRemote); err != nil {
+		log.Error(err, "Failed to update Fake Remote status")
+		return ctrl.Result{}, err
+	}
+
+	nextSkippedConfig, err := computeConfig(&fakeRemote.Spec)
+	if err != nil {
+		log.Error(err, "Failed to skip Fake Remote")
+		return ctrl.Result{}, err
+	}
+	lastSkippedConfig := fakeRemote.GetAnnotations()[lastSkippedConfigAnnotation]
+	if nextSkippedConfig != lastSkippedConfig {
+		fakeRemote.GetAnnotations()[lastSkippedConfigAnnotation] = nextSkippedConfig
+		if err = r.Update(ctx, fakeRemote); err != nil {
+			log.Error(err, "Failed to skip while updating Fake Remote annotations")
+			return ctrl.Result{}, err
+		}
+		log.Info("Fake Remote Skipped config updated")
+	} else {
+		log.Info("Fake Remote Skipped config unchanged")
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -231,23 +274,51 @@ func (r *FakeRemoteReconciler) fail(ctx context.Context, fakeRemote *testopv1.Fa
 }
 
 func setLastAppliedConfig(fakeRemote *testopv1.FakeRemote) error {
-	previousSpecRaw, err := json.Marshal(fakeRemote.Spec)
-	if err != nil {
-		return fmt.Errorf("failed to marshal annotation %q to JSON: %v", lastAppliedConfigAnnotation, err)
-	}
-	fakeRemote.GetAnnotations()[lastAppliedConfigAnnotation] = string(previousSpecRaw)
-	return nil
+	return setAnnotationConfig(fakeRemote, lastAppliedConfigAnnotation)
 }
 
 func getLastAppliedConfig(fakeRemote *testopv1.FakeRemote) (*testopv1.FakeRemoteSpec, error) {
-	previousSpecRaw := fakeRemote.GetAnnotations()[lastAppliedConfigAnnotation]
+	return getLastConfig(fakeRemote, lastAppliedConfigAnnotation)
+}
+
+func getLastSkippedConfig(fakeRemote *testopv1.FakeRemote) (*testopv1.FakeRemoteSpec, error) {
+	return getLastConfig(fakeRemote, lastSkippedConfigAnnotation)
+}
+
+func getLastConfig(fakeRemote *testopv1.FakeRemote, annotation string) (*testopv1.FakeRemoteSpec, error) {
+	previousSpecRaw := fakeRemote.GetAnnotations()[annotation]
 	if previousSpecRaw == "" {
 		return nil, nil
 	}
 	fakeRemoteSpec := testopv1.FakeRemoteSpec{}
 	err := json.Unmarshal([]byte(previousSpecRaw), &fakeRemoteSpec)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal annotation %q as JSON: %v", lastAppliedConfigAnnotation, err)
+		return nil, fmt.Errorf("failed to unmarshal annotation %q as JSON: %v", annotation, err)
 	}
 	return &fakeRemoteSpec, nil
+}
+
+func hasPolicySkip(fakeRemote *testopv1.FakeRemote) bool {
+	return fakeRemote.GetAnnotations()[resourcePolicyAnnotation] == reconciliationPolicySkip
+}
+
+func setAnnotationConfig(fakeRemote *testopv1.FakeRemote, annotation string) error {
+	previousSpecRaw, err := computeConfig(&fakeRemote.Spec)
+	if err != nil {
+		return fmt.Errorf("failed to marshal annotation %q: %v", annotation, err)
+	}
+	fakeRemote.GetAnnotations()[annotation] = string(previousSpecRaw)
+	return nil
+}
+
+func computeConfig(fakeRemoteSpec *testopv1.FakeRemoteSpec) (string, error) {
+	raw, err := json.Marshal(fakeRemoteSpec)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal spec to JSON: %v", err)
+	}
+	return string(raw), nil
+}
+
+func areDependentsDisabled(specDependents []string, lastSkippedConfig *testopv1.FakeRemoteSpec) bool {
+	return len(specDependents) == 0 && lastSkippedConfig != nil && len(lastSkippedConfig.Dependents) == 0
 }
