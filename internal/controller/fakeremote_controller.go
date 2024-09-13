@@ -100,6 +100,12 @@ func (r *FakeRemoteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// Skip reconciliation if the spec did not change
+	if r.specUnchanged(ctx, fakeRemote) {
+		log.Error(err, "Skip reconcile as spec did not change")
+		return ctrl.Result{}, nil
+	}
+
 	// Let's just set the status as Unknown when no status is available
 	if fakeRemote.Status.Conditions == nil || len(fakeRemote.Status.Conditions) == 0 {
 		meta.SetStatusCondition(&fakeRemote.Status.Conditions, metav1.Condition{
@@ -129,6 +135,16 @@ func (r *FakeRemoteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&testopv1.FakeRemote{}).
 		Complete(r)
+}
+
+func (r *FakeRemoteReconciler) specUnchanged(ctx context.Context, fakeRemote *testopv1.FakeRemote) bool {
+	log := log.FromContext(ctx)
+	lastConfig, err := getLastAppliedConfig(fakeRemote)
+	if err != nil {
+		log.Error(err, "Failed to read last applied config")
+		return false
+	}
+	return reflect.DeepEqual(lastConfig, fakeRemote.Spec)
 }
 
 func (r *FakeRemoteReconciler) reconcile(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
