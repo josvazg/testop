@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- testop_v1_fakeremote.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples
