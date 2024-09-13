@@ -1,0 +1,16 @@
+apiVersion: testop.gitlab.com/v1
+kind: FakeRemote
+metadata:
+  labels:
+    app.kubernetes.io/name: fakeremote
+    app.kubernetes.io/instance: fakeremote-sample
+    app.kubernetes.io/part-of: testop
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: testop
+  name: fakeremote-sample
+spec:
+  someOtherField: something-else-1
+  dependents:
+    - aaaa
+    - bbb
+    - cc
