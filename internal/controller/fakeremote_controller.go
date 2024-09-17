@@ -100,12 +100,6 @@ func (r *FakeRemoteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// Skip reconciliation if the spec did not change
-	if r.specUnchanged(ctx, fakeRemote) {
-		log.Error(err, "Skip reconcile as spec did not change")
-		return ctrl.Result{}, nil
-	}
-
 	// Let's just set the status as Unknown when no status is available
 	if fakeRemote.Status.Conditions == nil || len(fakeRemote.Status.Conditions) == 0 {
 		meta.SetStatusCondition(&fakeRemote.Status.Conditions, metav1.Condition{
@@ -121,9 +115,14 @@ func (r *FakeRemoteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers
 	if !controllerutil.ContainsFinalizer(fakeRemote, FakeRemoteFinalizerLabel) {
 		log.Info("Adding Finalizer for Fake Remote")
+		original := fakeRemote.DeepCopy()
 		if ok := controllerutil.AddFinalizer(fakeRemote, FakeRemoteFinalizerLabel); !ok {
 			log.Error(err, "Failed to add finalizer into the custom resource")
 			return ctrl.Result{Requeue: true}, nil
+		}
+		if err := r.Patch(ctx, fakeRemote, client.MergeFrom(original)); err != nil {
+			log.Error(err, "Failed to patch in finalizer fo Fake Remote")
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -135,16 +134,6 @@ func (r *FakeRemoteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&testopv1.FakeRemote{}).
 		Complete(r)
-}
-
-func (r *FakeRemoteReconciler) specUnchanged(ctx context.Context, fakeRemote *testopv1.FakeRemote) bool {
-	log := log.FromContext(ctx)
-	lastConfig, err := getLastAppliedConfig(fakeRemote)
-	if err != nil {
-		log.Error(err, "Failed to read last applied config")
-		return false
-	}
-	return reflect.DeepEqual(lastConfig, fakeRemote.Spec)
 }
 
 func (r *FakeRemoteReconciler) reconcile(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
@@ -161,15 +150,16 @@ func (r *FakeRemoteReconciler) reconcile(ctx context.Context, fakeRemote *testop
 	case deleting:
 		return r.delete(ctx, fakeRemote)
 	case previousSpec == nil:
-		return r.set(ctx, fakeRemote)
+		return r.create(ctx, fakeRemote)
 	case !reflect.DeepEqual(previousSpec, fakeRemote.Spec):
 		return r.update(ctx, fakeRemote, previousSpec)
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *FakeRemoteReconciler) set(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
+func (r *FakeRemoteReconciler) create(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+	original := fakeRemote.DeepCopy()
 
 	log.Info("Setting Fake Remote initial state...")
 	log.Info("Set field", "someOtherField", fakeRemote.Spec.SomeOtherField)
@@ -178,12 +168,22 @@ func (r *FakeRemoteReconciler) set(ctx context.Context, fakeRemote *testopv1.Fak
 	if err := setLastAppliedConfig(fakeRemote); err != nil {
 		r.fail(ctx, fakeRemote, err)
 	}
-
-	return r.ok(ctx, fakeRemote, "Set")
+	if err := r.apply(ctx, original, fakeRemote, "Set"); err != nil {
+		return r.fail(ctx, fakeRemote, err)
+	}
+	return r.ok(ctx, fakeRemote)
 }
 
 func (r *FakeRemoteReconciler) update(ctx context.Context, fakeRemote *testopv1.FakeRemote, previousSpec *testopv1.FakeRemoteSpec) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	// Skip reconciliation if the spec did not change
+	if r.specUnchanged(ctx, fakeRemote) {
+		log.Info("Skip update as spec did not change")
+		return ctrl.Result{}, nil
+	}
+
+	original := fakeRemote.DeepCopy()
 
 	log.Info("Updating Fake Remote state...")
 	if fakeRemote.Spec.SomeOtherField != previousSpec.SomeOtherField {
@@ -205,22 +205,62 @@ func (r *FakeRemoteReconciler) update(ctx context.Context, fakeRemote *testopv1.
 	}
 
 	if err := setLastAppliedConfig(fakeRemote); err != nil {
-		r.fail(ctx, fakeRemote, err)
+		return r.fail(ctx, fakeRemote, err)
+	}
+	if err := r.apply(ctx, original, fakeRemote, "Updated"); err != nil {
+		return r.fail(ctx, fakeRemote, err)
+	}
+	return r.ok(ctx, fakeRemote)
+}
+
+func (r *FakeRemoteReconciler) apply(ctx context.Context, original, fakeRemote *testopv1.FakeRemote, msg string) error {
+	log := log.FromContext(ctx)
+
+	if err := r.Patch(ctx, fakeRemote, client.MergeFrom(original)); err != nil {
+		log.Error(err, "Failed to patch Fake Remote annotations")
+		return err
+	}
+	meta.SetStatusCondition(&fakeRemote.Status.Conditions, metav1.Condition{
+		Type:    typeAvailableFakeRemote,
+		Status:  metav1.ConditionTrue,
+		Reason:  "ReconcileOK",
+		Message: msg,
+	})
+	if err := r.Status().Update(ctx, fakeRemote); err != nil {
+		log.Error(err, "Failed to update Fake Remote status")
+		return err
 	}
 
-	return r.ok(ctx, fakeRemote, "Updated")
+	return nil
+}
+
+func (r *FakeRemoteReconciler) ok(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
+	log.Info("Reconcile completed OK")
+	return ctrl.Result{}, nil
+}
+
+func (r *FakeRemoteReconciler) specUnchanged(ctx context.Context, fakeRemote *testopv1.FakeRemote) bool {
+	log := log.FromContext(ctx)
+	lastConfig, err := getLastAppliedConfig(fakeRemote)
+	if err != nil {
+		log.Error(err, "Failed to read last applied config")
+		return false
+	}
+	return reflect.DeepEqual(lastConfig, &fakeRemote.Spec)
 }
 
 func (r *FakeRemoteReconciler) delete(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+	original := fakeRemote.DeepCopy()
 
 	log.Info("Deleting Fake Remote...")
 	log.Info("Deleted field", "someOtherField", fakeRemote.Spec.SomeOtherField)
 	log.Info("Deleted list", "dependents", fakeRemote.Spec.Dependents)
 
 	controllerutil.RemoveFinalizer(fakeRemote, FakeRemoteFinalizerLabel)
-	if err := r.Update(ctx, fakeRemote); err != nil {
-		log.Error(err, "Failed to delete Fake Remote")
+	if err := r.Patch(ctx, fakeRemote, client.MergeFrom(original)); err != nil {
+		log.Error(err, "Failed to remove Fake Remote finalizer")
 		return ctrl.Result{}, err
 	}
 
@@ -229,10 +269,6 @@ func (r *FakeRemoteReconciler) delete(ctx context.Context, fakeRemote *testopv1.
 
 func (r *FakeRemoteReconciler) skip(ctx context.Context, fakeRemote *testopv1.FakeRemote) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
-	if err := r.Update(ctx, fakeRemote); err != nil {
-		log.Error(err, "Failed to update Fake Remote status")
-		return ctrl.Result{}, err
-	}
 
 	nextSkippedConfig, err := computeConfig(&fakeRemote.Spec)
 	if err != nil {
@@ -241,8 +277,9 @@ func (r *FakeRemoteReconciler) skip(ctx context.Context, fakeRemote *testopv1.Fa
 	}
 	lastSkippedConfig := fakeRemote.GetAnnotations()[lastSkippedConfigAnnotation]
 	if nextSkippedConfig != lastSkippedConfig {
+		original := fakeRemote.DeepCopy()
 		fakeRemote.GetAnnotations()[lastSkippedConfigAnnotation] = nextSkippedConfig
-		if err = r.Update(ctx, fakeRemote); err != nil {
+		if err = r.Patch(ctx, fakeRemote, client.MergeFrom(original)); err != nil {
 			log.Error(err, "Failed to skip while updating Fake Remote annotations")
 			return ctrl.Result{}, err
 		}
@@ -250,26 +287,6 @@ func (r *FakeRemoteReconciler) skip(ctx context.Context, fakeRemote *testopv1.Fa
 	} else {
 		log.Info("Fake Remote Skipped config unchanged")
 	}
-	return ctrl.Result{}, nil
-}
-
-func (r *FakeRemoteReconciler) ok(ctx context.Context, fakeRemote *testopv1.FakeRemote, msg string) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	meta.SetStatusCondition(&fakeRemote.Status.Conditions, metav1.Condition{
-		Type:    typeAvailableFakeRemote,
-		Status:  metav1.ConditionTrue,
-		Reason:  "ReconcileOK",
-		Message: msg,
-	})
-	if err := r.Update(ctx, fakeRemote); err != nil {
-		log.Error(err, "Failed to update Fake Remote annotations")
-		return ctrl.Result{}, err
-	}
-	if err := r.Status().Update(ctx, fakeRemote); err != nil {
-		log.Error(err, "Failed to update Fake Remote status")
-		return ctrl.Result{}, err
-	}
-
 	return ctrl.Result{}, nil
 }
 
